@@ -6,6 +6,7 @@
 <title>King Shop Mobile — Sistema de Gestión</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
   :root {
     --bg: #080d14;
@@ -551,6 +552,60 @@ let DB = { productos:[], ventas:[], movimientos:[], clientes:[], facturaCounter:
 let carrito = [], editProdIdx = null, currentFactura = null, ventaAEliminarId = null, chartRefs = {};
 
 // ============================================================
+// BASE DE DATOS EN LA NUBE (Supabase)
+// ============================================================
+// 1) Crea un proyecto gratis en https://supabase.com
+// 2) En Settings > API copia "Project URL" y "anon public key"
+// 3) Pégalos abajo reemplazando los dos textos entre comillas
+const SUPABASE_URL = "https://snyirjlwwmdzfqscbtyj.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable__nCb3JC5iBZK_CPvQehTYA_9fhRWBhf";
+let supabaseClient = null;
+let cloudDisponible = false;
+try {
+  if (SUPABASE_URL.startsWith('https://') && SUPABASE_ANON_KEY.length > 10) {
+    supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    cloudDisponible = true;
+  }
+} catch(e) { console.error('Supabase no configurado todavía:', e); }
+
+// Guarda TODO el estado actual (productos, ventas, clientes, movimientos) en la nube
+let guardando = false, guardarPendiente = false;
+async function saveState(){
+  if(!cloudDisponible) return; // sin configurar aún: sigue funcionando solo en este navegador
+  if(guardando){ guardarPendiente = true; return; }
+  guardando = true;
+  try{
+    const payload = { productos:DB.productos, ventas:DB.ventas, clientes:DB.clientes, movimientos:DB.movimientos, facturaCounter:DB.facturaCounter };
+    const { error } = await supabaseClient.from('app_state').upsert({ id:1, data:payload, updated_at:new Date().toISOString() });
+    if(error){ console.error('Error guardando en la nube:', error); toast('⚠️ No se pudo guardar en la nube',true); }
+  } catch(e){ console.error('Error guardando en la nube:', e); }
+  guardando = false;
+  if(guardarPendiente){ guardarPendiente = false; saveState(); }
+}
+
+// Carga el estado guardado en la nube; si no hay nada aún, siembra datos demo y los guarda
+async function loadState(){
+  if(!cloudDisponible){ seedData(); return; }
+  try{
+    const { data, error } = await supabaseClient.from('app_state').select('data').eq('id',1).single();
+    if(error) throw error;
+    if(data && data.data && Array.isArray(data.data.productos) && data.data.productos.length){
+      DB.productos = data.data.productos;
+      DB.ventas = data.data.ventas || [];
+      DB.clientes = data.data.clientes || [];
+      DB.movimientos = data.data.movimientos || [];
+      DB.facturaCounter = data.data.facturaCounter || DB.facturaCounter;
+    } else {
+      seedData();
+      await saveState();
+    }
+  } catch(e){
+    console.error('No se pudo leer la nube, usando datos locales:', e);
+    seedData();
+  }
+}
+
+// ============================================================
 // SEED
 // ============================================================
 function seedData() {
@@ -670,6 +725,7 @@ function confirmarEliminarVenta(){
   ventaAEliminarId=null;
   cerrarModal('modal-confirm-venta');
   toast(`🗑️ Venta ${v.id} eliminada — stock restaurado`);
+  saveState();
   // Refrescar la página activa
   const active=document.querySelector('.page.active');
   if(active){
@@ -716,8 +772,9 @@ function guardarProducto(){
   if(editProdIdx!==null)DB.productos[editProdIdx]=prod;else DB.productos.push(prod);
   cerrarModal('modal-producto');renderProductos();refreshSelectores();
   toast(editProdIdx!==null?'✅ Producto actualizado':'✅ Producto creado');
+  saveState();
 }
-function eliminarProducto(idx){if(!confirm('¿Eliminar este producto?'))return;DB.productos.splice(idx,1);renderProductos();refreshSelectores();toast('🗑️ Producto eliminado');}
+function eliminarProducto(idx){if(!confirm('¿Eliminar este producto?'))return;DB.productos.splice(idx,1);renderProductos();refreshSelectores();toast('🗑️ Producto eliminado');saveState();}
 
 // ============================================================
 // INVENTARIO
@@ -752,6 +809,7 @@ function guardarIngreso(){
   DB.movimientos.push({fecha:now.toISOString().split('T')[0],hora:now.toTimeString().slice(0,5),producto:p.nombre,tipo,cantidad:qty,ref:ref||'-',user:'Admin'});
   cerrarModal('modal-ingreso');renderInventario();refreshSelectores();
   toast(`📥 ${tipo}: ${qty} uds de ${p.nombre}`);
+  saveState();
 }
 
 // ============================================================
@@ -830,6 +888,7 @@ function finalizarVenta(){
   ['f-cliente','f-cedula','f-telefono','f-notas'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
   toast(`✅ Venta ${venta.id} — ${fmt(total)}`);
   verFactura(venta.id);
+  saveState();
 }
 
 // ============================================================
@@ -1062,6 +1121,7 @@ function guardarCliente(){
   if(!nombre){toast('El nombre es obligatorio',true);return;}
   DB.clientes.push({id:'C'+Date.now(),nombre,cedula:document.getElementById('c-cedula').value,telefono:document.getElementById('c-tel').value,email:document.getElementById('c-email').value,dir:document.getElementById('c-dir').value});
   cerrarModal('modal-cliente');renderClientes();toast('✅ Cliente registrado');
+  saveState();
 }
 
 // ============================================================
@@ -1125,8 +1185,8 @@ function toggleSidebar(force){
 // ============================================================
 // INIT
 // ============================================================
-function init(){
-  seedData();refreshSelectores();
+async function init(){
+  await loadState();refreshSelectores();
   const t=today();
   const fi=document.getElementById('filtro-desde');if(fi)fi.value=new Date(new Date().setDate(new Date().getDate()-30)).toISOString().split('T')[0];
   const fh=document.getElementById('filtro-hasta');if(fh)fh.value=t;
